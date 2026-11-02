@@ -39,7 +39,7 @@ builder.Services.AddHttpClient<IUserLookup, HttpUserLookup>(client =>
         address.Scheme is "http" or "https")
         client.BaseAddress = address;
     client.Timeout = TimeSpan.FromSeconds(5);
-});
+}).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddScoped<IGameRegistrationService, GameRegistrationService>();
 builder.Services.AddScoped<IGameCatalogService, GameCatalogService>();
 builder.Services.AddScoped<IGameAdministrationService, GameAdministrationService>();
