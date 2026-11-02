@@ -1,0 +1,11 @@
+.git/
+.vs/
+**/bin/
+**/obj/
+**/TestResults/
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+.env
+*.user

@@ -16,6 +16,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using CatalogAPI.Messaging;
+using CatalogAPI.Integrations;
 
 namespace CatalogAPI.Tests.Purchases;
 
@@ -56,7 +57,36 @@ public sealed class PurchaseEndpointTests
         Assert.Empty(app.Publisher.Events);
     }
 
+    [Fact]
+    public async Task Administrator_can_associate_game_only_with_existing_user()
+    {
+        using var app = new TestApp();
+        using var client = app.CreateClient();
+        var admin = Guid.NewGuid();
+        var target = Guid.NewGuid();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", app.Token(admin, "admin@example.com", "Administrator"));
+        var gameResponse = await client.PostAsJsonAsync("/api/admin/games",
+            new CreateGameCommand("Grant Game", "Description", "Action", 0m));
+        var game = await gameResponse.Content.ReadFromJsonAsync<GameRegistrationResponse>();
+        Assert.NotNull(game);
+
+        app.Users.Result = UserLookupResult.NotFound;
+        var missing = await client.PostAsync($"/api/admin/users/{target}/games/{game.Id}", null);
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+
+        app.Users.Result = UserLookupResult.Found;
+        var granted = await client.PostAsync($"/api/admin/users/{target}/games/{game.Id}", null);
+        Assert.Equal(HttpStatusCode.Created, granted.StatusCode);
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", app.Token(target, "user@example.com", "User"));
+        var library = await client.GetFromJsonAsync<LibraryItem[]>('/' + "api/library/me");
+        Assert.Contains(library!, item => item.GameId == game.Id);
+        var denied = await client.PostAsync($"/api/admin/users/{target}/games/{game.Id}", null);
+        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+    }
+
     private sealed record GameRegistrationResponse(Guid Id);
+    private sealed record LibraryItem(Guid GameId);
 
     private sealed class TestApp : WebApplicationFactory<global::Program>
     {
@@ -64,6 +94,7 @@ public sealed class PurchaseEndpointTests
         private readonly byte[] key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(48);
         private readonly Dictionary<string, string?> previousEnvironment = new();
         public TestPublisher Publisher { get; } = new();
+        public TestUserLookup Users { get; } = new();
 
         public TestApp()
         {
@@ -92,6 +123,8 @@ public sealed class PurchaseEndpointTests
             {
                 services.RemoveAll<IOrderEventPublisher>();
                 services.AddSingleton<IOrderEventPublisher>(Publisher);
+                services.RemoveAll<IUserLookup>();
+                services.AddSingleton<IUserLookup>(Users);
                 var worker = services.SingleOrDefault(x => x.ServiceType == typeof(IHostedService) &&
                     x.ImplementationType == typeof(PaymentResultConsumer));
                 if (worker is not null) services.Remove(worker);
@@ -132,5 +165,11 @@ public sealed class PurchaseEndpointTests
             Events.Add(value);
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class TestUserLookup : IUserLookup
+    {
+        public UserLookupResult Result { get; set; } = UserLookupResult.Found;
+        public Task<UserLookupResult> FindAsync(Guid userId, string bearerToken, CancellationToken ct) => Task.FromResult(Result);
     }
 }

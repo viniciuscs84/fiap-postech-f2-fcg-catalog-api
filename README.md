@@ -23,4 +23,10 @@ The service consumes `PaymentProcessedEvent` from `catalog.payment-processed`. I
 
 Configure RabbitMQ through `RabbitMq__HostName`, `RabbitMq__Port`, `RabbitMq__UserName`, `RabbitMq__Password`, and `RabbitMq__Exchange`. Supply the password from the runtime environment; do not commit it. The local defaults are `localhost:5672` and the RabbitMQ development user. The consumer retries when the broker is unavailable. Existing Wave 1 SQLite databases receive the pending-purchase table on startup.
 
-Administrative library association still requires a cross-service user-existence strategy and is not yet exposed. The current publication path does not provide guaranteed delivery if the process stops between saving a pending purchase and publishing its event.
+The Phase 1 administrator association remains at `POST /api/admin/users/{userId}/games/{gameId}`. Set `UsersApi__BaseUrl` to the trusted UsersAPI root URL (for example, `http://localhost:8081/` or the internal Compose URL). CatalogAPI forwards only the administrator's bearer token to UsersAPI's protected user lookup. An unknown user returns `404`; an unavailable or unconfigured UsersAPI returns `503` without granting a game. Regular users cannot call the route.
+
+The current publication path does not provide guaranteed delivery if the process stops between saving a pending purchase and publishing its event.
+
+## Container preparation
+
+`Dockerfile` publishes this service from its own repository into a .NET 8 runtime image. The image runs as the built-in non-root user, listens on port 8080, and stores SQLite data under `/data`. From this repository, build with `docker build -t fcg-catalog-api .` when Docker is available. The sibling `Fase 2/Orchestration` repository provides the prepared Compose entry point.

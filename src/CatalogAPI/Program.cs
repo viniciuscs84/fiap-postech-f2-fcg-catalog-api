@@ -6,6 +6,8 @@ using FCG.Application.Library;
 using FCG.Application.Promotions;
 using FCG.Application.Purchases;
 using CatalogAPI.Messaging;
+using CatalogAPI.Integrations;
+using System.Net.Http.Headers;
 using FCG.Infrastructure.Games;
 using FCG.Infrastructure.Library;
 using FCG.Infrastructure.Persistence;
@@ -17,6 +19,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("Catalog") ?? "Data Source=catalog.db"));
 builder.Services.AddScoped<IGameRepository, EfGameRepository>();
@@ -29,6 +33,13 @@ builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection("Ra
 builder.Services.AddSingleton<RabbitMqOrderPublisher>();
 builder.Services.AddSingleton<IOrderEventPublisher>(sp => sp.GetRequiredService<RabbitMqOrderPublisher>());
 builder.Services.AddHostedService<PaymentResultConsumer>();
+builder.Services.AddHttpClient<IUserLookup, HttpUserLookup>(client =>
+{
+    if (Uri.TryCreate(builder.Configuration["UsersApi:BaseUrl"], UriKind.Absolute, out var address) &&
+        address.Scheme is "http" or "https")
+        client.BaseAddress = address;
+    client.Timeout = TimeSpan.FromSeconds(5);
+});
 builder.Services.AddScoped<IGameRegistrationService, GameRegistrationService>();
 builder.Services.AddScoped<IGameCatalogService, GameCatalogService>();
 builder.Services.AddScoped<IGameAdministrationService, GameAdministrationService>();
@@ -163,6 +174,28 @@ app.MapGet("/api/library/me", [Authorize(Policy = "UserOrAdministrator")] async 
     if (!Guid.TryParse(principal.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
         return Results.Unauthorized();
     return Results.Ok(await service.GetMyLibraryAsync(userId, ct));
+});
+
+app.MapPost("/api/admin/users/{userId:guid}/games/{gameId:guid}", [Authorize(Policy = "AdministratorOnly")] async (
+    Guid userId, Guid gameId, HttpContext context, IUserLookup users, ILibraryService library, CancellationToken ct) =>
+{
+    if (!AuthenticationHeaderValue.TryParse(context.Request.Headers.Authorization, out var authorization) ||
+        !string.Equals(authorization.Scheme, "Bearer", StringComparison.OrdinalIgnoreCase) ||
+        string.IsNullOrWhiteSpace(authorization.Parameter))
+        return Results.Unauthorized();
+
+    var user = await users.FindAsync(userId, authorization.Parameter, ct);
+    if (user == UserLookupResult.NotFound) return Results.NotFound();
+    if (user == UserLookupResult.Unavailable) return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+
+    var result = await library.AcquireAsync(userId, gameId, ct);
+    return result switch
+    {
+        GameAcquisitionOutcome.Success success => Results.Created($"/api/admin/users/{userId}", success.Item),
+        GameAcquisitionOutcome.GameNotFound => Results.NotFound(),
+        GameAcquisitionOutcome.AlreadyAcquired => Results.Conflict(),
+        _ => throw new InvalidOperationException("Unexpected administrative acquisition outcome.")
+    };
 });
 
 app.MapPost("/api/library/me/purchases/{gameId:guid}", [Authorize(Policy = "UserOrAdministrator")] async (
