@@ -13,7 +13,7 @@ public interface IGameRepository
 
     Task<Game?> FindTrackedByIdAsync(Guid gameId, CancellationToken cancellationToken);
 
-    Task<bool> HasAcquisitionsAsync(Guid gameId, CancellationToken cancellationToken);
+    Task<bool> HasOwnershipOrPendingPurchaseAsync(Guid gameId, CancellationToken cancellationToken);
 
     /// <summary>Adds a game to the current persistence unit of work.</summary>
     Task AddAsync(Game game, CancellationToken cancellationToken);

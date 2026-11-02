@@ -1,6 +1,7 @@
 using FCG.Domain.Games;
 using FCG.Domain.Library;
 using FCG.Domain.Promotions;
+using FCG.Domain.Purchases;
 using Microsoft.EntityFrameworkCore;
 
 namespace FCG.Infrastructure.Persistence;
@@ -10,9 +11,22 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<Game> Games => Set<Game>();
     public DbSet<AcquiredGame> AcquiredGames => Set<AcquiredGame>();
     public DbSet<Promotion> Promotions => Set<Promotion>();
+    public DbSet<PendingPurchase> PendingPurchases => Set<PendingPurchase>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<PendingPurchase>(builder =>
+        {
+            builder.ToTable("PendingPurchases");
+            builder.HasKey(x => x.Id);
+            builder.Property(x => x.UserId).IsRequired();
+            builder.Property(x => x.GameId).IsRequired();
+            builder.Property(x => x.Price).HasPrecision(18, 2);
+            builder.Property(x => x.RecipientEmail).IsRequired().HasMaxLength(320);
+            builder.Property(x => x.CreatedAtUtc).IsRequired();
+            builder.HasIndex(x => new { x.UserId, x.GameId }).IsUnique();
+            builder.HasOne<Game>().WithMany().HasForeignKey(x => x.GameId).OnDelete(DeleteBehavior.Restrict);
+        });
         modelBuilder.Entity<Game>(builder =>
         {
             builder.ToTable("Games");

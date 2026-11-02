@@ -46,7 +46,7 @@ public sealed class GameAdministrationService(IGameRepository repository) : IGam
         var game = await repository.FindTrackedByIdAsync(gameId, cancellationToken);
         if (game is null)
             return new GameMutationResult(GameMutationKind.NotFound);
-        if (await repository.HasAcquisitionsAsync(gameId, cancellationToken))
+        if (await repository.HasOwnershipOrPendingPurchaseAsync(gameId, cancellationToken))
             return new GameMutationResult(GameMutationKind.Conflict);
 
         repository.Remove(game);

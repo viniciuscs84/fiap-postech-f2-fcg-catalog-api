@@ -4,10 +4,13 @@ using FCG.Application.Authentication;
 using FCG.Application.Games;
 using FCG.Application.Library;
 using FCG.Application.Promotions;
+using FCG.Application.Purchases;
+using CatalogAPI.Messaging;
 using FCG.Infrastructure.Games;
 using FCG.Infrastructure.Library;
 using FCG.Infrastructure.Persistence;
 using FCG.Infrastructure.Promotions;
+using FCG.Infrastructure.Purchases;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
@@ -19,6 +22,13 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 builder.Services.AddScoped<IGameRepository, EfGameRepository>();
 builder.Services.AddScoped<ILibraryRepository, EfLibraryRepository>();
 builder.Services.AddScoped<IPromotionRepository, EfPromotionRepository>();
+builder.Services.AddScoped<IPendingPurchaseRepository, EfPendingPurchaseRepository>();
+builder.Services.AddScoped<PurchaseService>();
+builder.Services.AddScoped<PaymentResultService>();
+builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection("RabbitMq"));
+builder.Services.AddSingleton<RabbitMqOrderPublisher>();
+builder.Services.AddSingleton<IOrderEventPublisher>(sp => sp.GetRequiredService<RabbitMqOrderPublisher>());
+builder.Services.AddHostedService<PaymentResultConsumer>();
 builder.Services.AddScoped<IGameRegistrationService, GameRegistrationService>();
 builder.Services.AddScoped<IGameCatalogService, GameCatalogService>();
 builder.Services.AddScoped<IGameAdministrationService, GameAdministrationService>();
@@ -57,6 +67,20 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     await db.Database.EnsureCreatedAsync();
+    // EnsureCreated does not add new tables to databases produced by Wave 1.
+    await db.Database.ExecuteSqlRawAsync("""
+        CREATE TABLE IF NOT EXISTS PendingPurchases (
+            Id TEXT NOT NULL CONSTRAINT PK_PendingPurchases PRIMARY KEY,
+            UserId TEXT NOT NULL,
+            GameId TEXT NOT NULL,
+            Price TEXT NOT NULL,
+            RecipientEmail TEXT NOT NULL,
+            CreatedAtUtc TEXT NOT NULL,
+            CONSTRAINT FK_PendingPurchases_Games_GameId FOREIGN KEY (GameId) REFERENCES Games (Id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS IX_PendingPurchases_GameId ON PendingPurchases (GameId);
+        CREATE UNIQUE INDEX IF NOT EXISTS IX_PendingPurchases_UserId_GameId ON PendingPurchases (UserId, GameId);
+        """);
 }
 
 app.UseSwagger();
@@ -139,6 +163,23 @@ app.MapGet("/api/library/me", [Authorize(Policy = "UserOrAdministrator")] async 
     if (!Guid.TryParse(principal.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
         return Results.Unauthorized();
     return Results.Ok(await service.GetMyLibraryAsync(userId, ct));
+});
+
+app.MapPost("/api/library/me/purchases/{gameId:guid}", [Authorize(Policy = "UserOrAdministrator")] async (
+    Guid gameId, ClaimsPrincipal principal, PurchaseService service, CancellationToken ct) =>
+{
+    if (!Guid.TryParse(principal.FindFirstValue(ClaimTypes.NameIdentifier), out var userId) ||
+        string.IsNullOrWhiteSpace(principal.FindFirstValue(ClaimTypes.Email)))
+        return Results.Unauthorized();
+    var result = await service.PlaceAsync(userId, gameId, principal.FindFirstValue(ClaimTypes.Email)!, ct);
+    return result switch
+    {
+        PurchasePlacementKind.Accepted => Results.Accepted(),
+        PurchasePlacementKind.GameNotFound => Results.NotFound(),
+        PurchasePlacementKind.AlreadyAcquired => Results.Conflict(),
+        PurchasePlacementKind.AlreadyPending => Results.Conflict(),
+        _ => throw new InvalidOperationException("Unexpected purchase result.")
+    };
 });
 
 app.Run();

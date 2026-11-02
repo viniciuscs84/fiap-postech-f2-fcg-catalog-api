@@ -28,8 +28,9 @@ public sealed class EfGameRepository(AppDbContext dbContext) : IGameRepository
     public Task<Game?> FindTrackedByIdAsync(Guid gameId, CancellationToken cancellationToken) =>
         dbContext.Games.SingleOrDefaultAsync(game => game.Id == gameId, cancellationToken);
 
-    public Task<bool> HasAcquisitionsAsync(Guid gameId, CancellationToken cancellationToken) =>
-        dbContext.AcquiredGames.AsNoTracking().AnyAsync(item => item.GameId == gameId, cancellationToken);
+    public async Task<bool> HasOwnershipOrPendingPurchaseAsync(Guid gameId, CancellationToken cancellationToken) =>
+        await dbContext.AcquiredGames.AsNoTracking().AnyAsync(item => item.GameId == gameId, cancellationToken) ||
+        await dbContext.PendingPurchases.AsNoTracking().AnyAsync(item => item.GameId == gameId, cancellationToken);
 
     /// <inheritdoc />
     public Task AddAsync(Game game, CancellationToken cancellationToken)

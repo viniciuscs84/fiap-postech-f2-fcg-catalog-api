@@ -48,7 +48,7 @@ public sealed class GameAdministrationServiceTests
             Task.FromResult(id == game.Id ? game : null);
         public Task<Game?> FindTrackedByIdAsync(Guid id, CancellationToken ct) =>
             FindByIdAsync(id, ct);
-        public Task<bool> HasAcquisitionsAsync(Guid id, CancellationToken ct) =>
+        public Task<bool> HasOwnershipOrPendingPurchaseAsync(Guid id, CancellationToken ct) =>
             Task.FromResult(IsAcquired);
         public Task AddAsync(Game item, CancellationToken ct) => Task.CompletedTask;
         public void Remove(Game item) => Removed = true;
