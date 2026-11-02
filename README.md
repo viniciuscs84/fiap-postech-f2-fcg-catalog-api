@@ -30,3 +30,5 @@ The current publication path does not provide guaranteed delivery if the process
 ## Container preparation
 
 `Dockerfile` publishes this service from its own repository into a .NET 8 runtime image. The image runs as the built-in non-root user, listens on port 8080, and stores SQLite data under `/data`. From this repository, build with `docker build -t fcg-catalog-api .` when Docker is available. The sibling `Fase 2/Orchestration` repository provides the prepared Compose entry point.
+
+The Docker Hub Personal workflow in `.github/workflows/docker-hub.yml` runs tests before publishing the public `<namespace>/fcg-catalog-api` image. Configure GitHub variable `DOCKERHUB_USERNAME` and secret `DOCKERHUB_TOKEN` in this repository after its GitHub remote exists. See the orchestration README for image tags and pull commands.
