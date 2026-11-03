@@ -32,3 +32,7 @@ The current publication path does not provide guaranteed delivery if the process
 `Dockerfile` publishes this service from its own repository into a .NET 8 runtime image. The image runs as the built-in non-root user, listens on port 8080, and stores SQLite data under `/data`. From this repository, build with `docker build -t fcg-catalog-api .` when Docker is available. The sibling `Fase 2/Orchestration` repository provides the prepared Compose entry point.
 
 The Docker Hub Personal workflow in `.github/workflows/docker-hub.yml` runs tests before publishing the public `viniciuscs84/fcg-catalog-api` image. The public GitHub repository is `viniciuscs84/fiap-postech-f2-fcg-catalog-api`. Its `DOCKERHUB_USERNAME` variable and encrypted `DOCKERHUB_TOKEN` secret are configured. The image is published with `main` and full-commit `sha-...` tags. See the orchestration README for pull commands and token rotation.
+
+## Local Kubernetes manifest
+
+`k8s/all.yaml` owns this service's Deployment, ClusterIP Service, and SQLite persistent volume claim in namespace `fcg-phase2`. The shared ConfigMap supplies `UsersApi__BaseUrl=http://usersapi:8080/` and the RabbitMQ Service name; the shared Secret supplies JWT and broker credentials. Kind setup and apply order are documented in the sibling `Orchestration/README.md`. The Deployment runs as non-root UID 1654.
