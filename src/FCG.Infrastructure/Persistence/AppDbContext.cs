@@ -12,9 +12,28 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<AcquiredGame> AcquiredGames => Set<AcquiredGame>();
     public DbSet<Promotion> Promotions => Set<Promotion>();
     public DbSet<PendingPurchase> PendingPurchases => Set<PendingPurchase>();
+    public DbSet<OrderOutboxMessage> OrderOutbox => Set<OrderOutboxMessage>();
+    public DbSet<ProcessedPaymentEvent> ProcessedPaymentEvents => Set<ProcessedPaymentEvent>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<OrderOutboxMessage>(builder =>
+        {
+            builder.ToTable("OrderOutbox");
+            builder.HasKey(x => x.EventId);
+            builder.Property(x => x.OrderId).IsRequired();
+            builder.Property(x => x.Payload).IsRequired();
+            builder.HasIndex(x => x.OrderId).IsUnique();
+            builder.HasIndex(x => new { x.PublishedAtUtc, x.CreatedAtUtc });
+        });
+        modelBuilder.Entity<ProcessedPaymentEvent>(builder =>
+        {
+            builder.ToTable("ProcessedPaymentEvents");
+            builder.HasKey(x => x.EventId);
+            builder.Property(x => x.OrderId).IsRequired();
+            builder.Property(x => x.ProcessedAtUtc).IsRequired();
+            builder.HasIndex(x => x.OrderId).IsUnique();
+        });
         modelBuilder.Entity<PendingPurchase>(builder =>
         {
             builder.ToTable("PendingPurchases");

@@ -1,25 +1,28 @@
 using System.Text.Json;
-using FCG.Application.Purchases;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 
 namespace CatalogAPI.Messaging;
 
-public sealed class RabbitMqOrderPublisher(IOptions<RabbitMqOptions> options) : IOrderEventPublisher, IAsyncDisposable
+public sealed class RabbitMqOrderPublisher(IOptions<RabbitMqOptions> options) : IAsyncDisposable
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     private IConnection? connection;
     private IChannel? channel;
 
-    public async Task PublishAsync(OrderPlacedEvent value, CancellationToken ct)
+    public async Task PublishAsync(Guid eventId, ReadOnlyMemory<byte> body, CancellationToken ct)
     {
         await gate.WaitAsync(ct);
         try
         {
             var current = await GetChannelAsync(ct);
-            var body = JsonSerializer.SerializeToUtf8Bytes(value);
             await current.BasicPublishAsync(options.Value.Exchange, "order.placed", mandatory: true,
-                basicProperties: new BasicProperties { ContentType = "application/json", DeliveryMode = DeliveryModes.Persistent }, body: body,
+                basicProperties: new BasicProperties
+                {
+                    MessageId = eventId.ToString(), ContentType = "application/json",
+                    DeliveryMode = DeliveryModes.Persistent, Type = "OrderPlacedEvent",
+                    Headers = new Dictionary<string, object?> { ["x-fcg-contract-version"] = 2 }
+                }, body: body,
                 cancellationToken: ct);
         }
         finally { gate.Release(); }
@@ -38,7 +41,8 @@ public sealed class RabbitMqOrderPublisher(IOptions<RabbitMqOptions> options) : 
             };
             connection = await factory.CreateConnectionAsync(ct);
         }
-        channel = await connection.CreateChannelAsync(cancellationToken: ct);
+        channel = await connection.CreateChannelAsync(new CreateChannelOptions(
+            publisherConfirmationsEnabled: true, publisherConfirmationTrackingEnabled: true), ct);
         await channel.ExchangeDeclareAsync(options.Value.Exchange, ExchangeType.Direct, durable: true, cancellationToken: ct);
         await channel.QueueDeclareAsync("payments.order-placed", durable: true, exclusive: false,
             autoDelete: false, arguments: null, cancellationToken: ct);

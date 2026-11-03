@@ -27,11 +27,15 @@ builder.Services.AddScoped<IGameRepository, EfGameRepository>();
 builder.Services.AddScoped<ILibraryRepository, EfLibraryRepository>();
 builder.Services.AddScoped<IPromotionRepository, EfPromotionRepository>();
 builder.Services.AddScoped<IPendingPurchaseRepository, EfPendingPurchaseRepository>();
+builder.Services.AddScoped<IOrderOutboxRepository, EfOrderOutboxRepository>();
 builder.Services.AddScoped<PurchaseService>();
 builder.Services.AddScoped<PaymentResultService>();
 builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection("RabbitMq"));
 builder.Services.AddSingleton<RabbitMqOrderPublisher>();
-builder.Services.AddSingleton<IOrderEventPublisher>(sp => sp.GetRequiredService<RabbitMqOrderPublisher>());
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<EventMetrics>();
+builder.Services.AddHostedService<EventMetricsWorker>();
+builder.Services.AddHostedService<OrderOutboxRelay>();
 builder.Services.AddHostedService<PaymentResultConsumer>();
 builder.Services.AddHttpClient<IUserLookup, HttpUserLookup>(client =>
 {
@@ -91,6 +95,23 @@ using (var scope = app.Services.CreateScope())
         );
         CREATE INDEX IF NOT EXISTS IX_PendingPurchases_GameId ON PendingPurchases (GameId);
         CREATE UNIQUE INDEX IF NOT EXISTS IX_PendingPurchases_UserId_GameId ON PendingPurchases (UserId, GameId);
+        CREATE TABLE IF NOT EXISTS OrderOutbox (
+            EventId TEXT NOT NULL CONSTRAINT PK_OrderOutbox PRIMARY KEY,
+            OrderId TEXT NOT NULL,
+            Payload TEXT NOT NULL,
+            CreatedAtUtc TEXT NOT NULL,
+            PublishedAtUtc TEXT NULL,
+            LastAttemptAtUtc TEXT NULL,
+            AttemptCount INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS IX_OrderOutbox_OrderId ON OrderOutbox (OrderId);
+        CREATE INDEX IF NOT EXISTS IX_OrderOutbox_PublishedAtUtc_CreatedAtUtc ON OrderOutbox (PublishedAtUtc, CreatedAtUtc);
+        CREATE TABLE IF NOT EXISTS ProcessedPaymentEvents (
+            EventId TEXT NOT NULL CONSTRAINT PK_ProcessedPaymentEvents PRIMARY KEY,
+            OrderId TEXT NOT NULL,
+            ProcessedAtUtc TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS IX_ProcessedPaymentEvents_OrderId ON ProcessedPaymentEvents (OrderId);
         """);
 }
 
@@ -98,7 +119,19 @@ app.UseSwagger();
 app.UseSwaggerUI();
 app.UseAuthentication();
 app.UseAuthorization();
-app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.MapGet("/health", () => Results.Ok(new { status = "live", service = "CatalogAPI" }));
+app.MapGet("/health/live", () => Results.Ok(new { status = "live", service = "CatalogAPI" }));
+app.MapGet("/health/ready", async (AppDbContext db, CancellationToken requestCt) =>
+{
+    using var budget = CancellationTokenSource.CreateLinkedTokenSource(requestCt);
+    budget.CancelAfter(TimeSpan.FromSeconds(2));
+    try
+    {
+        await db.Games.AnyAsync(budget.Token).WaitAsync(TimeSpan.FromSeconds(2), requestCt);
+        return Results.Ok(new { status = "ready", service = "CatalogAPI" });
+    }
+    catch (Exception) { return Results.Json(new { status = "unavailable", service = "CatalogAPI" }, statusCode: 503); }
+});
 
 app.MapGet("/api/games", [Authorize(Policy = "UserOrAdministrator")] async (
     IGameCatalogService service, CancellationToken ct) => Results.Ok(await service.ListAsync(ct)));

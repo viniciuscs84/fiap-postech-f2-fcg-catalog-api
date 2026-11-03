@@ -4,6 +4,7 @@ using FCG.Application.Purchases;
 using FCG.Domain.Games;
 using FCG.Domain.Library;
 using FCG.Domain.Purchases;
+using System.Text.Json;
 
 namespace CatalogAPI.Tests.Purchases;
 
@@ -16,8 +17,10 @@ public sealed class PurchaseFlowTests
         var result = await fixture.Purchases.PlaceAsync(fixture.UserId, fixture.Game.Id, fixture.Email, default);
 
         Assert.Equal(PurchasePlacementKind.Accepted, result);
-        Assert.Single(fixture.Publisher.Events);
-        var order = fixture.Publisher.Events[0];
+        Assert.Single(fixture.Pending.Outbox);
+        var order = JsonSerializer.Deserialize<OrderPlacedEvent>(fixture.Pending.Outbox[0].Payload)!;
+        Assert.Equal(fixture.Pending.Items[0].Id, order.OrderId);
+        Assert.NotEqual(Guid.Empty, order.EventId);
         Assert.Equal(fixture.UserId, order.UserId);
         Assert.Equal(fixture.Game.Id, order.GameId);
         Assert.Equal(12.50m, order.Price);
@@ -34,7 +37,7 @@ public sealed class PurchaseFlowTests
         fixture.Library.Acquisitions.Add(AcquiredGame.Acquire(fixture.UserId, fixture.Game.Id, DateTime.UtcNow));
         Assert.Equal(PurchasePlacementKind.AlreadyAcquired,
             await fixture.Purchases.PlaceAsync(fixture.UserId, fixture.Game.Id, fixture.Email, default));
-        Assert.Empty(fixture.Publisher.Events);
+        Assert.Empty(fixture.Pending.Outbox);
     }
 
     [Theory]
@@ -46,7 +49,7 @@ public sealed class PurchaseFlowTests
         await fixture.Purchases.PlaceAsync(fixture.UserId, fixture.Game.Id, fixture.Email, default);
 
         var outcome = await fixture.Results.HandleAsync(
-            new PaymentProcessedEvent(fixture.UserId, fixture.Game.Id, status, fixture.Email), default);
+            fixture.Payment(status), default);
 
         Assert.Equal(PaymentApplicationKind.Processed, outcome);
         Assert.Equal(acquired, fixture.Library.Acquisitions.Count == 1);
@@ -60,9 +63,10 @@ public sealed class PurchaseFlowTests
         await fixture.Purchases.PlaceAsync(fixture.UserId, fixture.Game.Id, fixture.Email, default);
         foreach (var payment in new[]
         {
-            new PaymentProcessedEvent(Guid.NewGuid(), fixture.Game.Id, "Approved", fixture.Email),
-            new PaymentProcessedEvent(fixture.UserId, Guid.NewGuid(), "Approved", fixture.Email),
-            new PaymentProcessedEvent(fixture.UserId, fixture.Game.Id, "Approved", "other@example.com")
+            fixture.Payment("Approved") with { UserId = Guid.NewGuid() },
+            fixture.Payment("Approved") with { GameId = Guid.NewGuid() },
+            fixture.Payment("Approved") with { RecipientEmail = "other@example.com" },
+            fixture.Payment("Approved") with { OrderId = Guid.NewGuid() }
         })
             Assert.Equal(PaymentApplicationKind.NoMatchingPurchase,
                 await fixture.Results.HandleAsync(payment, default));
@@ -76,10 +80,25 @@ public sealed class PurchaseFlowTests
     {
         var fixture = new Fixture();
         await fixture.Purchases.PlaceAsync(fixture.UserId, fixture.Game.Id, fixture.Email, default);
-        var payment = new PaymentProcessedEvent(fixture.UserId, fixture.Game.Id, "Approved", fixture.Email);
+        var payment = fixture.Payment("Approved");
         Assert.Equal(PaymentApplicationKind.Processed, await fixture.Results.HandleAsync(payment, default));
-        Assert.Equal(PaymentApplicationKind.NoMatchingPurchase, await fixture.Results.HandleAsync(payment, default));
+        Assert.Equal(PaymentApplicationKind.AlreadyProcessed, await fixture.Results.HandleAsync(payment, default));
         Assert.Single(fixture.Library.Acquisitions);
+    }
+
+    [Fact]
+    public async Task Delayed_result_from_an_old_attempt_cannot_settle_a_new_attempt()
+    {
+        var fixture = new Fixture();
+        await fixture.Purchases.PlaceAsync(fixture.UserId, fixture.Game.Id, fixture.Email, default);
+        var oldPayment = fixture.Payment("Rejected");
+        Assert.Equal(PaymentApplicationKind.Processed, await fixture.Results.HandleAsync(oldPayment, default));
+        await fixture.Purchases.PlaceAsync(fixture.UserId, fixture.Game.Id, fixture.Email, default);
+
+        Assert.Equal(PaymentApplicationKind.AlreadyProcessed,
+            await fixture.Results.HandleAsync(oldPayment with { EventId = Guid.NewGuid() }, default));
+        Assert.Empty(fixture.Library.Acquisitions);
+        Assert.Single(fixture.Pending.Items);
     }
 
     private sealed class Fixture
@@ -89,14 +108,19 @@ public sealed class PurchaseFlowTests
         public Game Game { get; } = Game.Create("Game", "Description", "Genre", Guid.NewGuid(), DateTime.UtcNow, 12.50m);
         public FakePending Pending { get; } = new();
         public FakeLibrary Library { get; } = new();
-        public FakePublisher Publisher { get; } = new();
         public PurchaseService Purchases { get; }
         public PaymentResultService Results { get; }
 
         public Fixture()
         {
-            Purchases = new PurchaseService(new FakeGames(Game), Library, Pending, Publisher);
+            Purchases = new PurchaseService(new FakeGames(Game), Library, Pending);
             Results = new PaymentResultService(new FakeGames(Game), Library, Pending);
+        }
+
+        public PaymentProcessedEvent Payment(string status)
+        {
+            var purchase = Assert.Single(Pending.Items);
+            return new PaymentProcessedEvent(Guid.NewGuid(), purchase.Id, UserId, Game.Id, status, Email);
         }
     }
 
@@ -125,16 +149,23 @@ public sealed class PurchaseFlowTests
     private sealed class FakePending : IPendingPurchaseRepository
     {
         public List<PendingPurchase> Items { get; } = [];
+        public List<OrderOutboxMessage> Outbox { get; } = [];
+        public List<ProcessedPaymentEvent> Processed { get; } = [];
         public Task<PendingPurchase?> FindAsync(Guid user, Guid game, CancellationToken ct) =>
             Task.FromResult(Items.SingleOrDefault(x => x.UserId == user && x.GameId == game));
+        public Task<PendingPurchase?> FindByOrderIdAsync(Guid orderId, CancellationToken ct) =>
+            Task.FromResult(Items.SingleOrDefault(x => x.Id == orderId));
         public Task AddAsync(PendingPurchase value, CancellationToken ct) { Items.Add(value); return Task.CompletedTask; }
+        public Task AddOutboxAsync(OrderOutboxMessage value, CancellationToken ct) { Outbox.Add(value); return Task.CompletedTask; }
+        public Task<bool> WasProcessedAsync(Guid eventId, Guid orderId, CancellationToken ct) =>
+            Task.FromResult(Processed.Any(x => x.EventId == eventId || x.OrderId == orderId));
+        public Task AddProcessedAsync(ProcessedPaymentEvent value, CancellationToken ct) { Processed.Add(value); return Task.CompletedTask; }
+        public Task<int> DeleteProcessedBeforeAsync(DateTime cutoffUtc, CancellationToken ct)
+        {
+            var removed = Processed.RemoveAll(x => x.ProcessedAtUtc < cutoffUtc);
+            return Task.FromResult(removed);
+        }
         public void Remove(PendingPurchase value) => Items.Remove(value);
         public Task<int> SaveChangesAsync(CancellationToken ct) => Task.FromResult(1);
-    }
-
-    private sealed class FakePublisher : IOrderEventPublisher
-    {
-        public List<OrderPlacedEvent> Events { get; } = [];
-        public Task PublishAsync(OrderPlacedEvent value, CancellationToken ct) { Events.Add(value); return Task.CompletedTask; }
     }
 }

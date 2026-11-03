@@ -15,11 +15,13 @@ Set `Jwt__Issuer`, `Jwt__Audience`, and `Jwt__SigningKey` to match the values us
 
 Start with `dotnet run --project src/CatalogAPI/CatalogAPI.csproj`. `/health` reports process availability. `/swagger` shows the current HTTP endpoints.
 
+`/health/live` reports process liveness; `/health/ready` performs a bounded read of the owned catalog database. Broker or UsersAPI lookup disruption does not fail readiness while catalog data can still be accepted durably. `/health` remains a liveness alias. Internal event metrics are written to the process temporary directory (`/tmp/fcg-metrics.json` in containers) without an HTTP metrics endpoint.
+
 ## Purchase flow
 
 `POST /api/library/me/purchases/{gameId}` requires a valid UsersAPI JWT. The user ID and recipient email come from its claims; the stored game supplies `Price`. A valid request records a pending purchase and publishes `OrderPlacedEvent` to the durable `payments.order-placed` RabbitMQ queue on the `fcg.events` direct exchange. The response is `202 Accepted`. The old direct self-service association endpoint remains absent.
 
-The service consumes `PaymentProcessedEvent` from `catalog.payment-processed`. It adds the game to the correct private library only for a matching pending purchase with `Approved` status. A `Rejected` result removes the pending purchase without granting ownership. The pending record prevents an unrelated result from granting a game and is not an order-history feature. Game deletion is blocked while a purchase is pending or the game is owned.
+The pending purchase and version 2 `OrderPlacedEvent` outbox row are saved atomically. A broker outage leaves the purchase pending; a worker retries and confirms publication. Confirmed rows remain for seven days, and unconfirmed rows remain until resolved. The event's stable `OrderId` identifies this purchase attempt. The service consumes `PaymentProcessedEvent` from `catalog.payment-processed` and applies it only to the matching attempt. An `Approved` result grants ownership once; a `Rejected` result settles without granting ownership. Processed-payment receipts remain for 30 days. Poison results move to `catalog.payment-processed.dead` after bounded retries. Game deletion is blocked while a purchase is pending or the game is owned.
 
 Configure RabbitMQ through `RabbitMq__HostName`, `RabbitMq__Port`, `RabbitMq__UserName`, `RabbitMq__Password`, and `RabbitMq__Exchange`. Supply the password from the runtime environment; do not commit it. The local defaults are `localhost:5672` and the RabbitMQ development user. The consumer retries when the broker is unavailable. Existing Wave 1 SQLite databases receive the pending-purchase table on startup.
 

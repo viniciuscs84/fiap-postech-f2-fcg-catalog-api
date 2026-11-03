@@ -17,11 +17,34 @@ using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using CatalogAPI.Messaging;
 using CatalogAPI.Integrations;
+using FCG.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 
 namespace CatalogAPI.Tests.Purchases;
 
 public sealed class PurchaseEndpointTests
 {
+    [Fact]
+    public async Task Readiness_fails_without_owned_database_while_liveness_stays_available()
+    {
+        using var app = new TestApp();
+        using var client = app.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/health/ready")).StatusCode);
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            await db.Database.ExecuteSqlRawAsync("DROP TABLE Games");
+        }
+        var ready = await client.GetAsync("/health/ready");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/health/live")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/health")).StatusCode);
+        var body = await ready.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("SQLite", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Games", body, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public async Task Purchase_route_uses_token_identity_and_catalog_price()
     {
@@ -40,7 +63,7 @@ public sealed class PurchaseEndpointTests
         var response = await client.PostAsync($"/api/library/me/purchases/{game.Id}", null);
 
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
-        var order = Assert.Single(app.Publisher.Events);
+        var order = Assert.Single(await app.OrdersAsync());
         Assert.Equal(user, order.UserId);
         Assert.Equal(game.Id, order.GameId);
         Assert.Equal(19.95m, order.Price);
@@ -54,7 +77,7 @@ public sealed class PurchaseEndpointTests
         using var client = app.CreateClient();
         var response = await client.PostAsync($"/api/library/me/purchases/{Guid.NewGuid()}", null);
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
-        Assert.Empty(app.Publisher.Events);
+        Assert.Empty(await app.OrdersAsync());
     }
 
     [Fact]
@@ -93,7 +116,6 @@ public sealed class PurchaseEndpointTests
         private readonly string dbPath = Path.Combine(Path.GetTempPath(), $"catalog-wave2-{Guid.NewGuid():N}.db");
         private readonly byte[] key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(48);
         private readonly Dictionary<string, string?> previousEnvironment = new();
-        public TestPublisher Publisher { get; } = new();
         public TestUserLookup Users { get; } = new();
 
         public TestApp()
@@ -121,14 +143,23 @@ public sealed class PurchaseEndpointTests
             }));
             builder.ConfigureTestServices(services =>
             {
-                services.RemoveAll<IOrderEventPublisher>();
-                services.AddSingleton<IOrderEventPublisher>(Publisher);
                 services.RemoveAll<IUserLookup>();
                 services.AddSingleton<IUserLookup>(Users);
                 var worker = services.SingleOrDefault(x => x.ServiceType == typeof(IHostedService) &&
                     x.ImplementationType == typeof(PaymentResultConsumer));
                 if (worker is not null) services.Remove(worker);
+                var relay = services.SingleOrDefault(x => x.ServiceType == typeof(IHostedService) &&
+                    x.ImplementationType == typeof(OrderOutboxRelay));
+                if (relay is not null) services.Remove(relay);
             });
+        }
+
+        public async Task<IReadOnlyList<OrderPlacedEvent>> OrdersAsync()
+        {
+            await using var scope = Services.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var payloads = await db.OrderOutbox.AsNoTracking().Select(x => x.Payload).ToListAsync();
+            return payloads.Select(x => JsonSerializer.Deserialize<OrderPlacedEvent>(x)!).ToList();
         }
 
         public string Token(Guid id, string email, string role)
@@ -154,16 +185,6 @@ public sealed class PurchaseEndpointTests
                 Environment.SetEnvironmentVariable(name, value);
             SqliteConnection.ClearAllPools();
             if (File.Exists(dbPath)) File.Delete(dbPath);
-        }
-    }
-
-    private sealed class TestPublisher : IOrderEventPublisher
-    {
-        public List<OrderPlacedEvent> Events { get; } = [];
-        public Task PublishAsync(OrderPlacedEvent value, CancellationToken ct)
-        {
-            Events.Add(value);
-            return Task.CompletedTask;
         }
     }
 
