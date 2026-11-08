@@ -32,7 +32,7 @@ spec:
         fsGroup: 1654
       containers:
         - name: catalogapi
-          image: viniciuscs84/fcg-catalog-api:sha-eca7805b26b0414f71073898b7b0132fc577e101
+          image: viniciuscs84/fcg-catalog-api:sha-65491861dbaeee4d6c4d4797c941a014c847cb4e
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
